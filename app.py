@@ -132,11 +132,14 @@ col4.metric(
     help=f"Annualized std. dev. of daily log returns over {VOL_WINDOW} trading days",
 )
 
-# --- Sidebar date filter (applies to all charts; defaults to all available history) ---
+# --- Sidebar date filter (applies to all charts) ---
+# Default view starts where TTF prices begin so no chart opens empty; the
+# selector still reaches back to the start of storage history.
 min_date, max_date = data["date"].min().date(), data["date"].max().date()
+default_start = prices.index.min().date()
 selected = st.sidebar.date_input(
     "Date range",
-    value=(min_date, max_date),
+    value=(default_start, max_date),
     min_value=min_date,
     max_value=max_date,
 )

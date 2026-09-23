@@ -46,5 +46,6 @@ streamlit run app.py
   with the min–max band and average of the five calendar years before it,
   plus today's gap to the average
 
-All charts share a sidebar date-range filter, defaulting to the full
-available history. Data is cached for an hour.
+All charts share a sidebar date-range filter. It defaults to the span of
+the TTF price history (from Oct 2017) and can be extended back to 2011 for
+storage-only history. Data is cached for an hour.
