@@ -46,6 +46,10 @@ streamlit run app.py
   with the min–max band and average of the five calendar years before it,
   plus today's gap to the average
 
+Content is organised into **Overview**, **Price & Volatility** and
+**Storage** tabs. The theme (Inter font, slate/deep-blue palette with light
+and dark variants) is defined in `.streamlit/config.toml`.
+
 All charts share a sidebar date-range filter. It defaults to the span of
 the TTF price history (from Oct 2017) and can be extended back to 2011 for
 storage-only history. Data is cached for an hour.

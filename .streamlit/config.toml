@@ -1,0 +1,39 @@
+# Visual theme for the TTF dashboard: neutral surfaces, deep-blue accent, Inter.
+# Light and dark palettes are defined separately so the app follows the
+# viewer's system setting (or their choice in the app menu).
+
+[theme]
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap, sans-serif"
+headingFont = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap, sans-serif"
+headingFontWeights = [700, 600, 600, 600, 600, 600]
+baseFontSize = 15
+metricValueFontWeight = 600
+baseRadius = "0.75rem"
+showWidgetBorder = true
+showSidebarBorder = true
+
+[theme.light]
+primaryColor = "#1c5cab"
+backgroundColor = "#fbfbfa"
+secondaryBackgroundColor = "#f1f0ed"
+textColor = "#1f2328"
+borderColor = "#e4e3df"
+linkColor = "#1c5cab"
+greenColor = "#0f8a3c"
+redColor = "#c93a3a"
+
+[theme.light.sidebar]
+backgroundColor = "#f4f3f0"
+
+[theme.dark]
+primaryColor = "#6da7ec"
+backgroundColor = "#141413"
+secondaryBackgroundColor = "#1f1f1d"
+textColor = "#ecebe8"
+borderColor = "#2f2f2c"
+linkColor = "#6da7ec"
+greenColor = "#3fb96b"
+redColor = "#e66767"
+
+[theme.dark.sidebar]
+backgroundColor = "#1a1a19"
