@@ -5,6 +5,8 @@ Pulls two daily series and merges them into a single dataset:
   * Dutch TTF front-month natural gas futures (Yahoo Finance, ticker TTF=F)
   * EU-aggregate gas storage levels (GIE AGSI+ transparency platform)
 
+Also provides a 5-year seasonal storage norm and realized price volatility.
+
 Usage:
     python data_pipeline.py
 
@@ -14,6 +16,7 @@ Requires an AGSI+ API key in a local .env file (see .env.example).
 import os
 from datetime import date, timedelta
 
+import numpy as np
 import pandas as pd
 import requests
 import yfinance as yf
@@ -22,6 +25,7 @@ from dotenv import load_dotenv
 TTF_TICKER = "TTF=F"
 AGSI_URL = "https://agsi.gie.eu/api"
 OUTPUT_CSV = "ttf_dataset.csv"
+TRADING_DAYS_PER_YEAR = 252
 
 load_dotenv()
 
@@ -46,12 +50,8 @@ def get_ttf_price(period: str = "6mo") -> pd.DataFrame:
     return df
 
 
-def get_eu_storage(days_back: int = 180, api_key: str | None = None) -> pd.DataFrame:
-    """Fetch daily EU-aggregate gas storage levels from AGSI+.
-
-    Args:
-        days_back: Number of calendar days of history to request.
-        api_key: AGSI+ API key. Defaults to the AGSI_API_KEY environment variable.
+def _fetch_agsi_storage(start: date, end: date, api_key: str | None = None) -> pd.DataFrame:
+    """Fetch EU-aggregate daily storage from AGSI+ for an explicit date range.
 
     Returns:
         DataFrame with columns: date, storage_pct_full, storage_twh.
@@ -60,8 +60,6 @@ def get_eu_storage(days_back: int = 180, api_key: str | None = None) -> pd.DataF
     if not api_key:
         raise ValueError("AGSI_API_KEY not set — add it to .env (see .env.example)")
 
-    end = date.today()
-    start = end - timedelta(days=days_back)
     params = {
         "from": start.isoformat(),
         "to": end.isoformat(),
@@ -84,7 +82,7 @@ def get_eu_storage(days_back: int = 180, api_key: str | None = None) -> pd.DataF
         params["page"] += 1
 
     if not records:
-        raise RuntimeError("No storage data returned from AGSI+")
+        raise RuntimeError(f"No storage data returned from AGSI+ for {start} to {end}")
 
     df = pd.DataFrame(records)[["gasDayStart", "full", "gasInStorage"]]
     df.columns = ["date", "storage_pct_full", "storage_twh"]
@@ -93,6 +91,71 @@ def get_eu_storage(days_back: int = 180, api_key: str | None = None) -> pd.DataF
     for col in ("storage_pct_full", "storage_twh"):
         df[col] = pd.to_numeric(df[col], errors="coerce")
     return df.sort_values("date").reset_index(drop=True)
+
+
+def get_eu_storage(days_back: int = 180, api_key: str | None = None) -> pd.DataFrame:
+    """Fetch daily EU-aggregate gas storage levels from AGSI+.
+
+    Args:
+        days_back: Number of calendar days of history to request.
+        api_key: AGSI+ API key. Defaults to the AGSI_API_KEY environment variable.
+
+    Returns:
+        DataFrame with columns: date, storage_pct_full, storage_twh.
+    """
+    end = date.today()
+    return _fetch_agsi_storage(end - timedelta(days=days_back), end, api_key)
+
+
+def day_of_year(dates: pd.Series) -> pd.Series:
+    """Map dates onto a fixed 365-day calendar so leap years line up.
+
+    Feb 29 maps to the same day as Feb 28; every later date in a leap year
+    is shifted back by one so e.g. 1 Oct is always day 274.
+    """
+    doy = dates.dt.dayofyear
+    after_feb28 = dates.dt.is_leap_year & (doy > 59)
+    return doy - after_feb28.astype(int)
+
+
+def get_storage_5y_range(years: int = 5, api_key: str | None = None) -> pd.DataFrame:
+    """Seasonal storage norm from the last `years` complete calendar years.
+
+    Pulls each full year from AGSI+ and aggregates storage % full by
+    day-of-year, giving the min/max band and average used as a seasonal norm.
+
+    Returns:
+        DataFrame with columns: day_of_year, storage_min, storage_max, storage_avg.
+    """
+    current_year = date.today().year
+    history = pd.concat(
+        _fetch_agsi_storage(date(y, 1, 1), date(y, 12, 31), api_key)
+        for y in range(current_year - years, current_year)
+    )
+    history["day_of_year"] = day_of_year(history["date"])
+
+    norm = (
+        history.groupby("day_of_year")["storage_pct_full"]
+        .agg(storage_min="min", storage_max="max", storage_avg="mean")
+        .reset_index()
+    )
+    return norm
+
+
+def compute_realized_volatility(df: pd.DataFrame, window: int = 30) -> pd.DataFrame:
+    """Rolling annualized realized volatility of TTF prices.
+
+    Uses daily log returns over `window` trading days, annualized with
+    sqrt(252). Non-trading days (NaN prices) are dropped first so weekends
+    don't create gaps in the return series.
+
+    Returns:
+        DataFrame with columns: date, realized_vol_pct.
+    """
+    prices = df.dropna(subset=["ttf_price_eur_mwh"]).sort_values("date")
+    log_returns = np.log(prices["ttf_price_eur_mwh"]).diff()
+    vol = log_returns.rolling(window).std() * np.sqrt(TRADING_DAYS_PER_YEAR) * 100
+    return pd.DataFrame({"date": prices["date"], "realized_vol_pct": vol}).dropna()
 
 
 def build_dataset(

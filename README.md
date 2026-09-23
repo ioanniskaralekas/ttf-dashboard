@@ -35,5 +35,12 @@ futures trade on business days only, so weekend rows have empty price fields.
 streamlit run app.py
 ```
 
-Shows the latest TTF price, 7-day price change and EU storage fill, with
-price and storage charts filterable by date range. Data is cached for an hour.
+- Headline metrics: latest TTF price, 7-day change, EU storage fill and
+  30-day realized volatility
+- TTF price with rolling 30-day annualized realized volatility
+  (std. dev. of daily log returns × √252)
+- EU storage against its 5-year seasonal norm: min–max band and average
+  from the last five complete years, plus the gap to the average today
+
+All charts share a sidebar date-range filter. Live data is cached for an
+hour, the 5-year norm for a day.
