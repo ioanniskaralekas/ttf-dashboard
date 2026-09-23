@@ -12,3 +12,6 @@ venv/
 .DS_Store
 .vscode/
 .idea/
+
+# Generated data
+ttf_dataset.csv
