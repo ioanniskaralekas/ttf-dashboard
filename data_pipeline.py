@@ -14,6 +14,7 @@ Requires an AGSI+ API key in a local .env file (see .env.example).
 """
 
 import os
+import time
 from datetime import date, timedelta
 
 import numpy as np
@@ -24,17 +25,22 @@ from dotenv import load_dotenv
 
 TTF_TICKER = "TTF=F"
 AGSI_URL = "https://agsi.gie.eu/api"
+AGSI_EARLIEST = date(2011, 1, 1)  # first gas day in the AGSI+ EU aggregate
+AGSI_MAX_RETRIES = 4
 OUTPUT_CSV = "ttf_dataset.csv"
 TRADING_DAYS_PER_YEAR = 252
 
 load_dotenv()
 
 
-def get_ttf_price(period: str = "6mo") -> pd.DataFrame:
+def get_ttf_price(period: str = "max") -> pd.DataFrame:
     """Fetch daily TTF front-month futures settlement prices.
 
+    Yahoo's continuous TTF=F series starts in October 2017, so "max" returns
+    roughly nine years rather than the full history of the contract.
+
     Args:
-        period: Lookback window in yfinance format (e.g. "1mo", "6mo", "1y").
+        period: Lookback window in yfinance format (e.g. "6mo", "5y", "max").
 
     Returns:
         DataFrame with columns: date, ttf_price_eur_mwh, volume.
@@ -47,7 +53,23 @@ def get_ttf_price(period: str = "6mo") -> pd.DataFrame:
     df.columns = ["date", "ttf_price_eur_mwh", "volume"]
     # Drop the exchange timezone so dates line up with the AGSI gas-day calendar
     df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None).dt.normalize()
+    _print_coverage(f"Yahoo Finance {TTF_TICKER}", df["date"])
     return df
+
+
+def _agsi_get(params: dict, headers: dict) -> dict:
+    """GET one AGSI+ page, retrying with exponential backoff on 429/5xx or timeouts."""
+    for attempt in range(AGSI_MAX_RETRIES):
+        try:
+            resp = requests.get(AGSI_URL, params=params, headers=headers, timeout=30)
+            if resp.status_code != 429 and resp.status_code < 500:
+                resp.raise_for_status()
+                return resp.json()
+        except (requests.ConnectionError, requests.Timeout):
+            if attempt == AGSI_MAX_RETRIES - 1:
+                raise
+        time.sleep(2 ** attempt)
+    resp.raise_for_status()  # out of retries on a 429/5xx: surface the HTTP error
 
 
 def _fetch_agsi_storage(start: date, end: date, api_key: str | None = None) -> pd.DataFrame:
@@ -70,16 +92,15 @@ def _fetch_agsi_storage(start: date, end: date, api_key: str | None = None) -> p
     }
     headers = {"x-key": api_key}
 
-    # Walk through result pages in case the window exceeds the page size
+    # The API caps pages at 300 rows, so full history takes ~20 requests
     records = []
     while True:
-        resp = requests.get(AGSI_URL, params=params, headers=headers, timeout=30)
-        resp.raise_for_status()
-        payload = resp.json()
+        payload = _agsi_get(params, headers)
         records.extend(payload.get("data", []))
         if params["page"] >= int(payload.get("last_page", 1)):
             break
         params["page"] += 1
+        time.sleep(0.2)  # stay well clear of AGSI+ rate limits
 
     if not records:
         raise RuntimeError(f"No storage data returned from AGSI+ for {start} to {end}")
@@ -93,18 +114,22 @@ def _fetch_agsi_storage(start: date, end: date, api_key: str | None = None) -> p
     return df.sort_values("date").reset_index(drop=True)
 
 
-def get_eu_storage(days_back: int = 180, api_key: str | None = None) -> pd.DataFrame:
+def get_eu_storage(days_back: int | None = None, api_key: str | None = None) -> pd.DataFrame:
     """Fetch daily EU-aggregate gas storage levels from AGSI+.
 
     Args:
-        days_back: Number of calendar days of history to request.
+        days_back: Number of calendar days of history to request. None (the
+            default) pulls everything back to the first AGSI+ gas day, 2011-01-01.
         api_key: AGSI+ API key. Defaults to the AGSI_API_KEY environment variable.
 
     Returns:
         DataFrame with columns: date, storage_pct_full, storage_twh.
     """
     end = date.today()
-    return _fetch_agsi_storage(end - timedelta(days=days_back), end, api_key)
+    start = AGSI_EARLIEST if days_back is None else max(end - timedelta(days=days_back), AGSI_EARLIEST)
+    df = _fetch_agsi_storage(start, end, api_key)
+    _print_coverage("AGSI+ EU storage", df["date"])
+    return df
 
 
 def day_of_year(dates: pd.Series) -> pd.Series:
@@ -118,28 +143,51 @@ def day_of_year(dates: pd.Series) -> pd.Series:
     return doy - after_feb28.astype(int)
 
 
-def get_storage_5y_range(years: int = 5, api_key: str | None = None) -> pd.DataFrame:
-    """Seasonal storage norm from the last `years` complete calendar years.
+def compute_storage_norms(storage: pd.DataFrame, years: int = 5) -> pd.DataFrame:
+    """Trailing seasonal storage norm for every year in the history.
 
-    Pulls each full year from AGSI+ and aggregates storage % full by
-    day-of-year, giving the min/max band and average used as a seasonal norm.
+    Each year is compared against the `years` complete calendar years before
+    it (e.g. 2026 against 2021-2025), so historical dates are never judged
+    against a norm built from their own future.
+
+    Args:
+        storage: Daily storage with columns date and storage_pct_full.
+        years: Number of prior years in the norm.
+
+    Returns:
+        DataFrame with columns: year, day_of_year, storage_min, storage_max,
+        storage_avg. Years without a full `years` of prior history are omitted.
+    """
+    df = storage.dropna(subset=["storage_pct_full"])
+    df = df.assign(year=df["date"].dt.year, day_of_year=day_of_year(df["date"]))
+    # year x day-of-year grid; Feb 28/29 share a slot and are averaged
+    grid = df.pivot_table(index="year", columns="day_of_year", values="storage_pct_full")
+    grid = grid.reindex(range(grid.index.min(), date.today().year + 1))
+
+    prior = grid.shift(1).rolling(years, min_periods=years)
+    stats = {"storage_min": prior.min(), "storage_max": prior.max(), "storage_avg": prior.mean()}
+    norms = pd.concat({name: frame.stack() for name, frame in stats.items()}, axis=1)
+    return norms.dropna().rename_axis(["year", "day_of_year"]).reset_index()
+
+
+def get_storage_5y_range(
+    years: int = 5, api_key: str | None = None, storage: pd.DataFrame | None = None
+) -> pd.DataFrame:
+    """Seasonal storage norm for the current year from the last `years` complete years.
+
+    Args:
+        years: Number of prior complete calendar years in the norm.
+        api_key: AGSI+ API key, used only if `storage` is not supplied.
+        storage: Daily storage history to reuse instead of fetching it again.
 
     Returns:
         DataFrame with columns: day_of_year, storage_min, storage_max, storage_avg.
     """
     current_year = date.today().year
-    history = pd.concat(
-        _fetch_agsi_storage(date(y, 1, 1), date(y, 12, 31), api_key)
-        for y in range(current_year - years, current_year)
-    )
-    history["day_of_year"] = day_of_year(history["date"])
-
-    norm = (
-        history.groupby("day_of_year")["storage_pct_full"]
-        .agg(storage_min="min", storage_max="max", storage_avg="mean")
-        .reset_index()
-    )
-    return norm
+    if storage is None:
+        storage = _fetch_agsi_storage(date(current_year - years, 1, 1), date.today(), api_key)
+    norms = compute_storage_norms(storage, years)
+    return norms[norms["year"] == current_year].drop(columns="year").reset_index(drop=True)
 
 
 def compute_realized_volatility(df: pd.DataFrame, window: int = 30) -> pd.DataFrame:
@@ -156,6 +204,13 @@ def compute_realized_volatility(df: pd.DataFrame, window: int = 30) -> pd.DataFr
     log_returns = np.log(prices["ttf_price_eur_mwh"]).diff()
     vol = log_returns.rolling(window).std() * np.sqrt(TRADING_DAYS_PER_YEAR) * 100
     return pd.DataFrame({"date": prices["date"], "realized_vol_pct": vol}).dropna()
+
+
+def _print_coverage(source: str, dates: pd.Series) -> None:
+    """Report the date span a source actually returned."""
+    first, last = dates.min(), dates.max()
+    years = (last - first).days / 365.25
+    print(f"{source}: {first:%Y-%m-%d} to {last:%Y-%m-%d} ({years:.1f} years, {len(dates)} rows)")
 
 
 def build_dataset(

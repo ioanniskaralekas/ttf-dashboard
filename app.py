@@ -19,28 +19,23 @@ import streamlit as st
 from data_pipeline import (
     build_dataset,
     compute_realized_volatility,
+    compute_storage_norms,
     day_of_year,
-    get_storage_5y_range,
 )
 
 LINE_COLOR = "#2a78d6"            # primary series
 NORM_COLOR = "#898781"            # 5-year average (neutral, reads on light and dark)
 BAND_FILL = "rgba(42, 120, 214, 0.15)"  # light tint of the primary hue
 VOL_WINDOW = 30
+NORM_YEARS = 5
 
 st.set_page_config(page_title="TTF Gas Market Dashboard", page_icon="⛽", layout="wide")
 
 
 @st.cache_data(ttl=3600)
 def load_data() -> tuple[pd.DataFrame, datetime]:
-    """Pull and merge both sources, cached for an hour across reruns."""
+    """Pull and merge full history from both sources, cached for an hour."""
     return build_dataset(), datetime.now(timezone.utc)
-
-
-@st.cache_data(ttl=24 * 3600)
-def load_storage_norm() -> pd.DataFrame:
-    """5-year seasonal storage norm; historical, so cached for a day."""
-    return get_storage_5y_range()
 
 
 def price_change_pct(prices: pd.Series, days: int = 7) -> float | None:
@@ -76,17 +71,17 @@ def storage_chart(storage: pd.DataFrame, x_range) -> go.Figure:
     fig.add_trace(go.Scatter(
         x=storage["date"], y=storage["storage_min"], mode="lines",
         line=dict(width=0), fill="tonexty", fillcolor=BAND_FILL,
-        name="5-year range", hoverinfo="skip",
+        name=f"Prior {NORM_YEARS}-year range", hoverinfo="skip",
     ))
     fig.add_trace(go.Scatter(
         x=storage["date"], y=storage["storage_avg"], mode="lines",
         line=dict(color=NORM_COLOR, width=2, dash="dash"),
-        name="5-year average", hovertemplate="%{y:.1f}%",
+        name=f"Prior {NORM_YEARS}-year average", hovertemplate="%{y:.1f}%",
     ))
     fig.add_trace(go.Scatter(
         x=storage["date"], y=storage["storage_pct_full"], mode="lines",
         line=dict(color=LINE_COLOR, width=2),
-        name=f"{storage['date'].dt.year.max()}", hovertemplate="%{y:.1f}%",
+        name="EU storage", hovertemplate="%{y:.1f}%",
     ))
     fig.update_layout(
         hovermode="x unified",
@@ -101,11 +96,14 @@ def storage_chart(storage: pd.DataFrame, x_range) -> go.Figure:
 
 # --- Data ---
 data, fetched_at = load_data()
-norm = load_storage_norm()
 
 prices = data.dropna(subset=["ttf_price_eur_mwh"]).set_index("date")["ttf_price_eur_mwh"]
 storage = data.dropna(subset=["storage_pct_full"])[["date", "storage_pct_full"]]
-storage = storage.assign(day_of_year=day_of_year(storage["date"])).merge(norm, on="day_of_year")
+# Attach each date's trailing norm; years before the first full norm keep NaN bands
+storage = storage.assign(year=storage["date"].dt.year, day_of_year=day_of_year(storage["date"]))
+storage = storage.merge(
+    compute_storage_norms(storage, NORM_YEARS), on=["year", "day_of_year"], how="left"
+)
 volatility = compute_realized_volatility(data, window=VOL_WINDOW)
 
 # --- Header ---
@@ -134,7 +132,7 @@ col4.metric(
     help=f"Annualized std. dev. of daily log returns over {VOL_WINDOW} trading days",
 )
 
-# --- Sidebar date filter (applies to all charts) ---
+# --- Sidebar date filter (applies to all charts; defaults to all available history) ---
 min_date, max_date = data["date"].min().date(), data["date"].max().date()
 selected = st.sidebar.date_input(
     "Date range",
@@ -165,18 +163,20 @@ st.plotly_chart(
 )
 
 # --- Storage vs 5-year norm ---
-st.subheader("EU gas storage vs 5-year range")
+st.subheader(f"EU gas storage vs prior {NORM_YEARS}-year range")
 gap = latest_storage["storage_pct_full"] - latest_storage["storage_avg"]
 direction = "above" if gap >= 0 else "below"
 st.markdown(
-    f"**{gap:+.1f}pp {direction} 5-year average** — "
+    f"**{gap:+.1f}pp {direction} {NORM_YEARS}-year average** — "
     f"{latest_storage['storage_pct_full']:.1f}% vs {latest_storage['storage_avg']:.1f}% "
     f"on {latest_storage['date']:%d %b %Y}"
 )
 st.plotly_chart(storage_chart(in_range(storage), x_range), width="stretch")
 
-norm_years = f"{max_date.year - 5}–{max_date.year - 1}"
+first_norm_year = int(storage.dropna(subset=["storage_avg"])["year"].min())
 st.caption(
-    f"Sources: Yahoo Finance (TTF=F), GIE AGSI+ transparency platform. "
-    f"5-year range covers {norm_years}."
+    f"Sources: Yahoo Finance (TTF=F, from {prices.index.min():%b %Y}), "
+    f"GIE AGSI+ transparency platform (from {storage['date'].min():%b %Y}). "
+    f"Each year's storage norm uses the {NORM_YEARS} preceding calendar years, "
+    f"so the band starts in {first_norm_year}."
 )

@@ -5,10 +5,13 @@ futures prices with EU-aggregate storage levels.
 
 ## Data sources
 
-| Series | Source | Fields |
-|---|---|---|
-| TTF front-month futures | Yahoo Finance (`TTF=F`) via `yfinance` | settlement price (EUR/MWh), volume |
-| EU gas storage | [GIE AGSI+](https://agsi.gie.eu/) API | % full, gas in storage (TWh) |
+| Series | Source | Fields | History |
+|---|---|---|---|
+| TTF front-month futures | Yahoo Finance (`TTF=F`) via `yfinance` | settlement price (EUR/MWh), volume | Oct 2017 onward |
+| EU gas storage | [GIE AGSI+](https://agsi.gie.eu/) API | % full, gas in storage (TWh) | Jan 2011 onward |
+
+The pipeline pulls the full available history from both sources (AGSI+ pages
+at 300 rows, so this is ~20 requests, with retry and backoff on rate limits).
 
 ## Setup
 
@@ -39,8 +42,9 @@ streamlit run app.py
   30-day realized volatility
 - TTF price with rolling 30-day annualized realized volatility
   (std. dev. of daily log returns × √252)
-- EU storage against its 5-year seasonal norm: min–max band and average
-  from the last five complete years, plus the gap to the average today
+- EU storage against a trailing 5-year seasonal norm: each year is compared
+  with the min–max band and average of the five calendar years before it,
+  plus today's gap to the average
 
-All charts share a sidebar date-range filter. Live data is cached for an
-hour, the 5-year norm for a day.
+All charts share a sidebar date-range filter, defaulting to the full
+available history. Data is cached for an hour.
