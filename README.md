@@ -28,3 +28,12 @@ python data_pipeline.py
 Prints the latest prices and storage readings and writes the merged daily
 dataset to `ttf_dataset.csv`. Storage is reported every calendar day while
 futures trade on business days only, so weekend rows have empty price fields.
+
+### Dashboard
+
+```bash
+streamlit run app.py
+```
+
+Shows the latest TTF price, 7-day price change and EU storage fill, with
+price and storage charts filterable by date range. Data is cached for an hour.
