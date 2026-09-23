@@ -50,6 +50,7 @@ Content is organised into **Overview**, **Price & Volatility** and
 **Storage** tabs. The theme (Inter font, slate/deep-blue palette with light
 and dark variants) is defined in `.streamlit/config.toml`.
 
-All charts share a sidebar date-range filter. It defaults to the span of
-the TTF price history (from Oct 2017) and can be extended back to 2011 for
-storage-only history. Data is cached for an hour.
+All charts share one date-range filter above the tabs. It opens on the last
+14 days; widen it to go back as far as 2011 (storage) or Oct 2017 (prices).
+Charts hold the full history, so you can also drag to pan, scroll to zoom
+and double-click to return to the selected range. Data is cached for an hour.

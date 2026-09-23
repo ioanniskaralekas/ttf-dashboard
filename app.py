@@ -30,6 +30,9 @@ BAND_FILL = "rgba(42, 120, 214, 0.15)"  # light tint of the primary hue
 CHART_FONT = "Inter, sans-serif"
 VOL_WINDOW = 30
 NORM_YEARS = 5
+DEFAULT_VIEW_DAYS = 14
+# Drag pans, scroll wheel zooms: standard trading-chart interaction
+CHART_CONFIG = {"scrollZoom": True, "displaylogo": False}
 
 st.set_page_config(page_title="TTF Gas Market Dashboard", page_icon="⛽", layout="wide")
 
@@ -50,10 +53,36 @@ def price_change(prices: pd.Series, days: int = 7) -> tuple[float, float] | None
     return prices.iloc[-1] - base, (prices.iloc[-1] / base - 1) * 100
 
 
-def style_chart(fig: go.Figure, height: int) -> go.Figure:
-    """Shared chart styling: Inter, transparent background, quiet margins."""
+def y_range_for(df: pd.DataFrame, columns: list[str], x_range, pad: float = 0.08):
+    """y-axis limits fitted to the data inside the visible x window.
+
+    Charts carry full history so users can pan, which would otherwise make
+    Plotly scale the y-axis to all-time extremes (e.g. the 2022 spike) and
+    flatten the default two-week view. Returns None (autorange) if the
+    window holds no data.
+    """
+    window = df.loc[df["date"].between(*x_range), columns]
+    lo, hi = window.min().min(), window.max().max()
+    if pd.isna(lo) or pd.isna(hi):
+        return None
+    span = (hi - lo) or abs(hi) or 1.0
+    floor = lo - span * pad
+    # Prices, volatility and fill levels can't go negative; don't pad below zero
+    if lo >= 0:
+        floor = max(floor, 0)
+    return [floor, hi + span * pad]
+
+
+def style_chart(fig: go.Figure, height: int, x_range) -> go.Figure:
+    """Shared styling and interaction: Inter, transparent background, drag-to-pan.
+
+    uirevision is tied to the selected range so a new selection resets the
+    view, while pans and zooms survive unrelated reruns.
+    """
     fig.update_layout(
         height=height,
+        dragmode="pan",
+        uirevision=f"{x_range[0]:%Y%m%d}-{x_range[1]:%Y%m%d}",
         hovermode="x unified",
         margin=dict(l=0, r=0, t=10, b=0),
         font=dict(family=CHART_FONT),
@@ -64,15 +93,16 @@ def style_chart(fig: go.Figure, height: int) -> go.Figure:
 
 
 def line_chart(df: pd.DataFrame, column: str, y_label: str, x_range, height: int = 420):
-    """Single-series time-series chart with a unified hover crosshair.
+    """Single-series time-series chart over full history, opened at x_range.
 
-    x_range pins the axis so stacked charts line up even when one series
-    starts later (e.g. volatility needs a full window of returns first).
+    x_range sets the initial view (and keeps stacked charts aligned); the
+    rest of the history stays loaded so dragging pans into it.
     """
     fig = px.line(df, x="date", y=column, labels={"date": "", column: y_label})
     fig.update_traces(line=dict(color=LINE_COLOR, width=2))
     fig.update_xaxes(range=x_range)
-    return style_chart(fig, height)
+    fig.update_yaxes(range=y_range_for(df, [column], x_range))
+    return style_chart(fig, height, x_range)
 
 
 def storage_chart(storage: pd.DataFrame, x_range) -> go.Figure:
@@ -103,7 +133,10 @@ def storage_chart(storage: pd.DataFrame, x_range) -> go.Figure:
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
     )
     fig.update_xaxes(range=x_range)
-    return style_chart(fig, height=460)
+    fig.update_yaxes(range=y_range_for(
+        storage, ["storage_pct_full", "storage_min", "storage_max", "storage_avg"], x_range
+    ))
+    return style_chart(fig, height=460, x_range=x_range)
 
 
 def section_header(title: str, subtitle: str | None = None) -> None:
@@ -129,34 +162,29 @@ latest_storage = storage.iloc[-1]
 storage_gap = latest_storage["storage_pct_full"] - latest_storage["storage_avg"]
 change = price_change(prices)
 
-# --- Sidebar date filter (applies to all charts) ---
-# Default view starts where TTF prices begin so no chart opens empty; the
-# selector still reaches back to the start of storage history.
 min_date, max_date = data["date"].min().date(), data["date"].max().date()
-default_start = prices.index.min().date()
-with st.sidebar:
-    st.markdown("#### Filters")
-    selected = st.date_input(
-        "Date range",
-        value=(default_start, max_date),
-        min_value=min_date,
-        max_value=max_date,
-    )
-    st.caption("Applies to all charts. Headline metrics always show the latest data.")
-# date_input returns a single date while the user is mid-selection
-start, end = selected if len(selected) == 2 else (selected[0], max_date)
-x_range = [pd.Timestamp(start), pd.Timestamp(end)]
-
-
-def in_range(df: pd.DataFrame) -> pd.DataFrame:
-    return df[df["date"].between(*x_range)]
-
 
 # --- Header ---
 with st.container(gap="small"):
     st.title("TTF Gas Market Dashboard")
     st.markdown("Live TTF price, EU storage vs 5-year norms, and realized volatility")
     st.caption(f"Data last updated: {fetched_at:%Y-%m-%d %H:%M} UTC")
+
+# --- Date filter (shared by all charts) ---
+# Opens on the last two weeks so no chart looks flat; full history back to
+# 2011 stays loaded, reachable by widening the range or panning the charts.
+with st.container(horizontal=True, vertical_alignment="bottom", gap="medium"):
+    selected = st.date_input(
+        "Date range",
+        value=(max_date - timedelta(days=DEFAULT_VIEW_DAYS), max_date),
+        min_value=min_date,
+        max_value=max_date,
+        width=280,
+    )
+    st.caption("Applies to all charts · drag to pan, scroll to zoom, double-click to reset")
+# date_input returns a single date while the user is mid-selection
+start, end = selected if len(selected) == 2 else (selected[0], max_date)
+x_range = [pd.Timestamp(start), pd.Timestamp(end)]
 
 overview_tab, price_tab, storage_tab = st.tabs(["Overview", "Price & Volatility", "Storage"])
 
@@ -198,9 +226,10 @@ with overview_tab:
         with st.container(border=True):
             section_header("TTF front-month price", "EUR/MWh, daily settlement")
             st.plotly_chart(
-                line_chart(in_range(prices.reset_index()), "ttf_price_eur_mwh", "EUR/MWh",
+                line_chart(prices.reset_index(), "ttf_price_eur_mwh", "EUR/MWh",
                            x_range, height=280),
                 width="stretch",
+                config=CHART_CONFIG,
                 key="overview_price",
             )
 
@@ -210,8 +239,9 @@ with price_tab:
         with st.container(border=True):
             section_header("TTF front-month price", "EUR/MWh, daily settlement")
             st.plotly_chart(
-                line_chart(in_range(prices.reset_index()), "ttf_price_eur_mwh", "EUR/MWh", x_range),
+                line_chart(prices.reset_index(), "ttf_price_eur_mwh", "EUR/MWh", x_range),
                 width="stretch",
+                config=CHART_CONFIG,
                 key="price",
             )
         with st.container(border=True):
@@ -220,9 +250,10 @@ with price_tab:
                 "Annualized standard deviation of daily log returns (× √252)",
             )
             st.plotly_chart(
-                line_chart(in_range(volatility), "realized_vol_pct", "Volatility (%)",
+                line_chart(volatility, "realized_vol_pct", "Volatility (%)",
                            x_range, height=260),
                 width="stretch",
+                config=CHART_CONFIG,
                 key="volatility",
             )
 
@@ -239,7 +270,9 @@ with storage_tab:
             f"{latest_storage['storage_pct_full']:.1f}% vs {latest_storage['storage_avg']:.1f}% "
             f"on {latest_storage['date']:%d %b %Y}"
         )
-        st.plotly_chart(storage_chart(in_range(storage), x_range), width="stretch", key="storage")
+        st.plotly_chart(
+            storage_chart(storage, x_range), width="stretch", config=CHART_CONFIG, key="storage"
+        )
 
 # --- Footer ---
 first_norm_year = int(storage.dropna(subset=["storage_avg"])["year"].min())
