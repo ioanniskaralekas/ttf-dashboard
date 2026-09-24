@@ -1,65 +1,98 @@
-# TTF Dashboard
+# TTF Gas Market Dashboard
 
-Data pipeline for the Dutch TTF natural gas market, combining front-month
-futures prices with EU-aggregate storage levels.
+An interactive dashboard for the European natural gas market, built around
+the Dutch **TTF** hub, Europe's main gas price benchmark. It brings price,
+volatility, storage, LNG supply and news together in one view, using free
+public data that refreshes automatically.
+
+> Built as a portfolio project for commodity trading job applications.
+
+## What's in the dashboard
+
+### Overview
+The market at a glance. Four headline metrics:
+- **TTF price**: latest front-month settlement (€/MWh)
+- **7-day change**: price move over the past week, in €/MWh and %
+- **EU storage fill**: how full EU gas storage is, and how that compares with the 5-year average
+- **30-day volatility**: how much prices have been swinging recently
+
+Plus a compact TTF price chart.
+
+### Price & Volatility
+TTF front-month price history since 2017, with **rolling 30-day realized
+volatility** below it: the annualized standard deviation of daily log
+returns (× √252). It shows when the market has been calm and when it has
+been stressed, such as the 2022 energy crisis.
+
+### Storage
+EU gas storage levels (% full) against a **5-year seasonal norm**: a shaded
+min–max band and a dashed average from the five previous years. A callout
+shows how far above or below normal storage is today. Storage is a key
+driver of winter supply risk and of the price.
+
+### Flows
+**EU LNG send-out**: the daily volume of regasified LNG entering European
+gas grids (GWh/d), summed across 30 EU terminals. Since Russian pipeline
+supply fell away, LNG has become Europe's main source of marginal supply.
+
+### News
+Live gas and energy market headlines from public RSS feeds, refreshed every
+30 minutes. Each card shows the headline, its source and how long ago it was
+published, and links to the original article.
+
+All charts share one date filter (the last 14 days by default) and work like
+trading charts: drag to pan, scroll to zoom, double-click to reset.
 
 ## Data sources
 
-| Series | Source | Fields | History |
-|---|---|---|---|
-| TTF front-month futures | Yahoo Finance (`TTF=F`) via `yfinance` | settlement price (EUR/MWh), volume | Oct 2017 onward |
-| EU gas storage | [GIE AGSI+](https://agsi.gie.eu/) API | % full, gas in storage (TWh) | Jan 2011 onward |
-| EU LNG send-out | [ENTSOG Transparency Platform](https://transparency.entsog.eu/) API | physical flow at LNG terminal entry points (kWh/d → GWh/d) | 3 years (app) |
-| Headlines | Public RSS feeds via `feedparser` | title, link, date, source | last few days |
+| Data | Source | History |
+|---|---|---|
+| TTF front-month futures | [Yahoo Finance](https://finance.yahoo.com/quote/TTF%3DF/) (`TTF=F`) via `yfinance` | Oct 2017 → |
+| EU gas storage | [GIE AGSI+](https://agsi.gie.eu/) transparency platform API | Jan 2011 → |
+| EU LNG send-out | [ENTSOG Transparency Platform](https://transparency.entsog.eu/) API | 3 years |
+| Headlines | RSS feeds: Reuters (via Google News), Natural Gas Intelligence, LNG Prime, OilPrice.com, Rigzone | Last few days |
 
-The pipeline pulls the full available history from both sources (AGSI+ pages
-at 300 rows, so this is ~20 requests, with retry and backoff on rate limits).
+<details>
+<summary>Methodology notes</summary>
 
-## Setup
+- **Seasonal norm:** each year is compared with the five calendar years
+  before it, so historical dates are never judged against their own future.
+- **LNG send-out:** ENTSOG has no working EU-level LNG total, so the
+  dashboard sums daily physical flow at every EU LNG terminal entry point.
+  UK terminals are excluded, and so is Spain's virtual tank point, to avoid
+  double counting. The latest days appear once 90% of terminals have reported.
+- **News:** only the headline, link, date and source are stored. Feeds that
+  mix oil and gas are filtered to gas headlines, and a feed that is down is
+  skipped rather than breaking the page.
+- **Caching:** prices and storage refresh hourly, news every 30 minutes,
+  LNG flows daily.
+
+</details>
+
+## Run it locally
+
+Requires Python 3.10+ and a free AGSI+ API key
+([register here](https://agsi.gie.eu/account)).
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+git clone https://github.com/ioanniskaralekas/ttf-dashboard.git
+cd ttf-dashboard
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # then add your free AGSI+ API key
-```
-
-## Usage
-
-```bash
-python data_pipeline.py
-```
-
-Prints the latest prices and storage readings and writes the merged daily
-dataset to `ttf_dataset.csv`. Storage is reported every calendar day while
-futures trade on business days only, so weekend rows have empty price fields.
-
-### Dashboard
-
-```bash
+cp .env.example .env        # then set AGSI_API_KEY=<your key> in .env
 streamlit run app.py
 ```
 
-- Headline metrics: latest TTF price, 7-day change, EU storage fill and
-  30-day realized volatility
-- TTF price with rolling 30-day annualized realized volatility
-  (std. dev. of daily log returns × √252)
-- EU storage against a trailing 5-year seasonal norm: each year is compared
-  with the min–max band and average of the five calendar years before it,
-  plus today's gap to the average
+The dashboard opens at http://localhost:8501.
 
-Content is organised into **Overview**, **Price & Volatility**, **Storage**,
-**Flows** and **News** tabs. Flows shows EU LNG send-out: ENTSOG has no
-working EU-level LNG aggregate, so it sums the daily physical flow at every
-EU LNG terminal entry point (30 terminals, UK excluded, Spain's virtual tank
-point excluded to avoid double counting). News shows the latest gas-market headlines (title, source,
-link and time only) from public RSS feeds (Reuters via Google News, Natural
-Gas Intelligence, LNG Prime, OilPrice.com, Rigzone), cached for 30 minutes.
-Mixed oil/gas feeds are filtered to gas headlines, and a feed that is down
-is skipped rather than breaking the page. The theme (Inter font, slate/deep-blue palette with light
-and dark variants) is defined in `.streamlit/config.toml`.
+To fetch the raw price and storage data without the dashboard, run
+`python data_pipeline.py`. It writes the merged daily dataset to `ttf_dataset.csv`.
 
-All charts share one date-range filter above the tabs. It opens on the last
-14 days; widen it to go back as far as 2011 (storage) or Oct 2017 (prices).
-Charts hold the full history, so you can also drag to pan, scroll to zoom
-and double-click to return to the selected range. Data is cached for an hour.
+## Project structure
+
+| File | Purpose |
+|---|---|
+| `data_pipeline.py` | Data fetching and calculations: prices, storage, seasonal norms, volatility, LNG flows, news |
+| `app.py` | Streamlit dashboard: layout, charts, metrics |
+| `.streamlit/config.toml` | Theme: colours, fonts, light and dark mode |
+| `requirements.txt` | Pinned Python dependencies |
