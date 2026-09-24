@@ -10,6 +10,7 @@ Usage:
     streamlit run app.py
 """
 
+import re
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
@@ -22,6 +23,7 @@ from data_pipeline import (
     compute_realized_volatility,
     compute_storage_norms,
     day_of_year,
+    get_gas_news,
 )
 
 LINE_COLOR = "#2a78d6"            # primary series
@@ -41,6 +43,27 @@ st.set_page_config(page_title="TTF Gas Market Dashboard", page_icon="⛽", layou
 def load_data() -> tuple[pd.DataFrame, datetime]:
     """Pull and merge full history from both sources, cached for an hour."""
     return build_dataset(), datetime.now(timezone.utc)
+
+
+@st.cache_data(ttl=1800)
+def load_news() -> pd.DataFrame:
+    """Latest gas-market headlines, refreshed every 30 minutes."""
+    return get_gas_news(limit=15)
+
+
+def time_ago(moment: datetime, now: datetime) -> str:
+    """Relative timestamp such as '2 hours ago' or '1 day ago'."""
+    seconds = max((now - moment).total_seconds(), 0)
+    for unit, size in (("day", 86400), ("hour", 3600), ("minute", 60)):
+        if seconds >= size:
+            count = int(seconds // size)
+            return f"{count} {unit}{'s' if count != 1 else ''} ago"
+    return "just now"
+
+
+def escape_markdown(text: str) -> str:
+    """Escape characters that Streamlit markdown would interpret in feed titles."""
+    return re.sub(r"([\\`*_{}\[\]()#+\-.!|<>$~])", r"\\\1", text)
 
 
 def price_change(prices: pd.Series, days: int = 7) -> tuple[float, float] | None:
@@ -186,7 +209,9 @@ with st.container(horizontal=True, vertical_alignment="bottom", gap="medium"):
 start, end = selected if len(selected) == 2 else (selected[0], max_date)
 x_range = [pd.Timestamp(start), pd.Timestamp(end)]
 
-overview_tab, price_tab, storage_tab = st.tabs(["Overview", "Price & Volatility", "Storage"])
+overview_tab, price_tab, storage_tab, news_tab = st.tabs(
+    ["Overview", "Price & Volatility", "Storage", "News"]
+)
 
 # --- Overview: headline metrics + compact price chart ---
 with overview_tab:
@@ -273,6 +298,28 @@ with storage_tab:
         st.plotly_chart(
             storage_chart(storage, x_range), width="stretch", config=CHART_CONFIG, key="storage"
         )
+
+# --- News: recent gas-market headlines ---
+with news_tab:
+    try:
+        news = load_news()
+    except Exception:  # news is supplementary; never let it break the dashboard
+        news = pd.DataFrame(columns=["title", "link", "published", "source"])
+        news.attrs["failed_feeds"] = ["all feeds"]
+
+    section_header("Gas market headlines", "Latest from public RSS feeds · refreshed every 30 minutes")
+    if news.empty:
+        st.info("Headlines are unavailable right now. Please check back shortly.")
+    now = datetime.now(timezone.utc)
+    with st.container(gap="small"):
+        for item in news.itertuples():
+            with st.container(border=True, gap="small"):
+                link = item.link.replace(" ", "%20").replace(")", "%29")  # keep markdown link intact
+                st.markdown(f"**[{escape_markdown(item.title)}]({link})**")
+                st.caption(f"{item.source} · {time_ago(item.published, now)}")
+    failed = news.attrs.get("failed_feeds", [])
+    if failed:
+        st.caption(f"Unavailable right now: {', '.join(failed)}")
 
 # --- Footer ---
 first_norm_year = int(storage.dropna(subset=["storage_avg"])["year"].min())

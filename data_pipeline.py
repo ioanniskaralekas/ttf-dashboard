@@ -5,7 +5,8 @@ Pulls two daily series and merges them into a single dataset:
   * Dutch TTF front-month natural gas futures (Yahoo Finance, ticker TTF=F)
   * EU-aggregate gas storage levels (GIE AGSI+ transparency platform)
 
-Also provides a 5-year seasonal storage norm and realized price volatility.
+Also provides a 5-year seasonal storage norm, realized price volatility and
+recent gas-market headlines from public RSS feeds.
 
 Usage:
     python data_pipeline.py
@@ -13,10 +14,14 @@ Usage:
 Requires an AGSI+ API key in a local .env file (see .env.example).
 """
 
+import calendar
 import os
+import re
 import time
-from datetime import date, timedelta
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date, datetime, timedelta, timezone
 
+import feedparser
 import numpy as np
 import pandas as pd
 import requests
@@ -29,6 +34,25 @@ AGSI_EARLIEST = date(2011, 1, 1)  # first gas day in the AGSI+ EU aggregate
 AGSI_MAX_RETRIES = 4
 OUTPUT_CSV = "ttf_dataset.csv"
 TRADING_DAYS_PER_YEAR = 252
+
+# RSS sources for gas-market headlines: (source name, URL, gas-keyword filter).
+# Reuters no longer publishes public RSS, so its gas coverage comes via a
+# Google News search restricted to reuters.com. Google News matches article
+# text, and OilPrice/Rigzone mix oil and gas, so those are filtered to
+# headlines that mention gas; the two gas-specialist feeds are kept whole.
+NEWS_FEEDS = [
+    ("Reuters", "https://news.google.com/rss/search?q=European+gas+site:reuters.com+when:7d"
+                "&hl=en-GB&gl=GB&ceid=GB:en", True),
+    ("Google News", "https://news.google.com/rss/search?q=%22European+gas%22+OR+TTF+gas+when:7d"
+                    "&hl=en-GB&gl=GB&ceid=GB:en", True),
+    ("Natural Gas Intelligence", "https://www.naturalgasintel.com/feed/", False),
+    ("LNG Prime", "https://lngprime.com/feed/", False),
+    ("OilPrice.com", "https://oilprice.com/rss/main", True),
+    ("Rigzone", "https://www.rigzone.com/news/rss/rigzone_latest.aspx", True),
+]
+GAS_KEYWORDS = re.compile(r"\b(gas|lng|ttf|regasification|gazprom)\b", re.IGNORECASE)
+FEED_TIMEOUT_SECONDS = 10
+MAX_HEADLINES_PER_SOURCE = 4  # stop one prolific feed from filling the list
 
 load_dotenv()
 
@@ -204,6 +228,69 @@ def compute_realized_volatility(df: pd.DataFrame, window: int = 30) -> pd.DataFr
     log_returns = np.log(prices["ttf_price_eur_mwh"]).diff()
     vol = log_returns.rolling(window).std() * np.sqrt(TRADING_DAYS_PER_YEAR) * 100
     return pd.DataFrame({"date": prices["date"], "realized_vol_pct": vol}).dropna()
+
+
+def _fetch_feed(source: str, url: str, gas_only: bool) -> list[dict]:
+    """Fetch and parse one RSS feed into headline records.
+
+    Raises on network/HTTP errors so the caller can skip the feed. Only
+    metadata is kept: title, link, published time and source.
+    """
+    # requests (not feedparser's own fetcher) so the call has a timeout
+    resp = requests.get(url, timeout=FEED_TIMEOUT_SECONDS,
+                        headers={"User-Agent": "Mozilla/5.0 (ttf-dashboard RSS reader)"})
+    resp.raise_for_status()
+
+    records = []
+    for entry in feedparser.parse(resp.content).entries:
+        title, link = entry.get("title", "").strip(), entry.get("link", "")
+        stamp = entry.get("published_parsed") or entry.get("updated_parsed")
+        if not title or not link.startswith(("https://", "http://")) or stamp is None:
+            continue
+        # Google News appends " - Publisher" to titles and names it in <source>
+        publisher = entry.get("source", {}).get("title")
+        if publisher and title.endswith(f" - {publisher}"):
+            title = title[: -len(f" - {publisher}")]
+        if gas_only and not GAS_KEYWORDS.search(title):
+            continue
+        records.append({
+            "title": title,
+            "link": link,
+            "published": datetime.fromtimestamp(calendar.timegm(stamp), tz=timezone.utc),
+            "source": publisher or source,
+        })
+    return records
+
+
+def get_gas_news(limit: int = 15) -> pd.DataFrame:
+    """Recent European gas / energy market headlines from public RSS feeds.
+
+    Feeds are fetched in parallel; any feed that errors or returns nothing
+    is skipped so the others still show. Headlines only: no article text.
+
+    Returns:
+        DataFrame with columns: title, link, published (UTC), source, sorted
+        newest first. df.attrs["failed_feeds"] lists feeds that could not be read.
+    """
+    records, failed = [], []
+    with ThreadPoolExecutor(max_workers=len(NEWS_FEEDS)) as pool:
+        futures = {name: pool.submit(_fetch_feed, name, url, gas_only)
+                   for name, url, gas_only in NEWS_FEEDS}
+        for name, future in futures.items():
+            try:
+                records.extend(future.result())
+            except Exception as exc:  # one bad feed must not take down the rest
+                print(f"News feed skipped ({name}): {type(exc).__name__}: {exc}")
+                failed.append(name)
+
+    news = pd.DataFrame(records, columns=["title", "link", "published", "source"])
+    # The two Google News searches overlap; keep one copy of each headline
+    news = news.drop_duplicates(subset="title")
+    news = news.sort_values("published", ascending=False)
+    news = news.groupby("source").head(MAX_HEADLINES_PER_SOURCE)
+    news = news.head(limit).reset_index(drop=True)
+    news.attrs["failed_feeds"] = failed
+    return news
 
 
 def _print_coverage(source: str, dates: pd.Series) -> None:

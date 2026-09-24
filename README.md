@@ -9,6 +9,7 @@ futures prices with EU-aggregate storage levels.
 |---|---|---|---|
 | TTF front-month futures | Yahoo Finance (`TTF=F`) via `yfinance` | settlement price (EUR/MWh), volume | Oct 2017 onward |
 | EU gas storage | [GIE AGSI+](https://agsi.gie.eu/) API | % full, gas in storage (TWh) | Jan 2011 onward |
+| Headlines | Public RSS feeds via `feedparser` | title, link, date, source | last few days |
 
 The pipeline pulls the full available history from both sources (AGSI+ pages
 at 300 rows, so this is ~20 requests, with retry and backoff on rate limits).
@@ -46,8 +47,12 @@ streamlit run app.py
   with the min–max band and average of the five calendar years before it,
   plus today's gap to the average
 
-Content is organised into **Overview**, **Price & Volatility** and
-**Storage** tabs. The theme (Inter font, slate/deep-blue palette with light
+Content is organised into **Overview**, **Price & Volatility**, **Storage**
+and **News** tabs. News shows the latest gas-market headlines (title, source,
+link and time only) from public RSS feeds (Reuters via Google News, Natural
+Gas Intelligence, LNG Prime, OilPrice.com, Rigzone), cached for 30 minutes.
+Mixed oil/gas feeds are filtered to gas headlines, and a feed that is down
+is skipped rather than breaking the page. The theme (Inter font, slate/deep-blue palette with light
 and dark variants) is defined in `.streamlit/config.toml`.
 
 All charts share one date-range filter above the tabs. It opens on the last
