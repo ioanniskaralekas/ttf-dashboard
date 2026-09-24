@@ -46,9 +46,14 @@ def load_data() -> tuple[pd.DataFrame, datetime]:
     return build_dataset(), datetime.now(timezone.utc)
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_lng_sendout() -> pd.DataFrame:
-    """EU LNG send-out from ENTSOG over the full storage history window, cached for an hour."""
+    """Three years of EU LNG send-out from ENTSOG, cached for a day.
+
+    The data is daily, and a cold fetch across all terminals takes ~11-14s
+    (repeat requests are fast once ENTSOG has cached the query), so one pull
+    per day keeps the page quick without losing history.
+    """
     df = get_lng_sendout(days_back=365 * 3)
     return df.assign(terminals=[df.attrs["terminals"]] * len(df))  # attrs don't survive caching
 
