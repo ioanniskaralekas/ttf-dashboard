@@ -24,6 +24,7 @@ from data_pipeline import (
     compute_storage_norms,
     day_of_year,
     get_gas_news,
+    get_lng_sendout,
 )
 
 LINE_COLOR = "#2a78d6"            # primary series
@@ -43,6 +44,13 @@ st.set_page_config(page_title="TTF Gas Market Dashboard", page_icon="⛽", layou
 def load_data() -> tuple[pd.DataFrame, datetime]:
     """Pull and merge full history from both sources, cached for an hour."""
     return build_dataset(), datetime.now(timezone.utc)
+
+
+@st.cache_data(ttl=3600)
+def load_lng_sendout() -> pd.DataFrame:
+    """EU LNG send-out from ENTSOG over the full storage history window, cached for an hour."""
+    df = get_lng_sendout(days_back=365 * 3)
+    return df.assign(terminals=[df.attrs["terminals"]] * len(df))  # attrs don't survive caching
 
 
 @st.cache_data(ttl=1800)
@@ -209,8 +217,8 @@ with st.container(horizontal=True, vertical_alignment="bottom", gap="medium"):
 start, end = selected if len(selected) == 2 else (selected[0], max_date)
 x_range = [pd.Timestamp(start), pd.Timestamp(end)]
 
-overview_tab, price_tab, storage_tab, news_tab = st.tabs(
-    ["Overview", "Price & Volatility", "Storage", "News"]
+overview_tab, price_tab, storage_tab, flows_tab, news_tab = st.tabs(
+    ["Overview", "Price & Volatility", "Storage", "Flows", "News"]
 )
 
 # --- Overview: headline metrics + compact price chart ---
@@ -298,6 +306,52 @@ with storage_tab:
         st.plotly_chart(
             storage_chart(storage, x_range), width="stretch", config=CHART_CONFIG, key="storage"
         )
+
+# --- Flows: EU LNG send-out ---
+with flows_tab:
+    with st.container(border=True):
+        section_header(
+            "EU LNG send-out",
+            "Regasified LNG entering EU transmission grids, GWh/d (ENTSOG physical flows)",
+        )
+        try:
+            lng = load_lng_sendout()
+        except Exception as exc:  # show exactly what went wrong instead of failing silently
+            st.warning(f"LNG send-out data is unavailable: {exc}")
+        else:
+            latest_lng = lng.iloc[-1]
+            week_ago = lng[lng["date"] <= latest_lng["date"] - timedelta(days=7)]
+            with st.container(horizontal=True, gap="medium"):
+                st.metric(
+                    "Latest send-out (GWh/d)",
+                    f"{latest_lng['lng_sendout_gwh']:,.0f}",
+                    delta=None if week_ago.empty else
+                    f"{latest_lng['lng_sendout_gwh'] / week_ago.iloc[-1]['lng_sendout_gwh'] - 1:+.1%} w/w",
+                    delta_color="off",
+                    help=f"Gas day {latest_lng['date']:%d %b %Y}",
+                    border=True,
+                    width=240,
+                )
+                st.metric(
+                    "7-day average (GWh/d)",
+                    f"{lng['lng_sendout_gwh'].tail(7).mean():,.0f}",
+                    border=True,
+                    width=240,
+                )
+            st.plotly_chart(
+                line_chart(lng, "lng_sendout_gwh", "GWh/d", x_range),
+                width="stretch",
+                config=CHART_CONFIG,
+                key="lng_sendout",
+            )
+            terminals = latest_lng["terminals"]
+            st.caption(
+                f"Sum of {len(terminals)} EU terminal entry points reporting to ENTSOG "
+                f"(UK terminals excluded; history from {lng['date'].min():%b %Y}). "
+                f"The latest gas days appear once at least 90% of terminals have reported."
+            )
+            with st.expander("Terminals included"):
+                st.write(", ".join(terminals))
 
 # --- News: recent gas-market headlines ---
 with news_tab:

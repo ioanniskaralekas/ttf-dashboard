@@ -5,8 +5,8 @@ Pulls two daily series and merges them into a single dataset:
   * Dutch TTF front-month natural gas futures (Yahoo Finance, ticker TTF=F)
   * EU-aggregate gas storage levels (GIE AGSI+ transparency platform)
 
-Also provides a 5-year seasonal storage norm, realized price volatility and
-recent gas-market headlines from public RSS feeds.
+Also provides a 5-year seasonal storage norm, realized price volatility,
+EU LNG send-out (ENTSOG) and recent gas-market headlines from public RSS feeds.
 
 Usage:
     python data_pipeline.py
@@ -34,6 +34,13 @@ AGSI_EARLIEST = date(2011, 1, 1)  # first gas day in the AGSI+ EU aggregate
 AGSI_MAX_RETRIES = 4
 OUTPUT_CSV = "ttf_dataset.csv"
 TRADING_DAYS_PER_YEAR = 252
+
+ENTSOG_URL = "https://transparency.entsog.eu/api/v1/"
+# LNG points to leave out of the EU total: UK terminals (not EU) and Spain's
+# virtual LNG tank point, which would double-count the Spanish terminals.
+LNG_EXCLUDED_COUNTRIES = {"UK"}
+LNG_EXCLUDED_POINT_PREFIXES = ("VTP-",)
+LNG_MIN_REPORTING_SHARE = 0.9  # drop trailing days until most terminals have reported
 
 # RSS sources for gas-market headlines: (source name, URL, gas-keyword filter).
 # Reuters no longer publishes public RSS, so its gas coverage comes via a
@@ -228,6 +235,111 @@ def compute_realized_volatility(df: pd.DataFrame, window: int = 30) -> pd.DataFr
     log_returns = np.log(prices["ttf_price_eur_mwh"]).diff()
     vol = log_returns.rolling(window).std() * np.sqrt(TRADING_DAYS_PER_YEAR) * 100
     return pd.DataFrame({"date": prices["date"], "realized_vol_pct": vol}).dropna()
+
+
+def _entsog_get(endpoint: str, params: dict) -> list[dict]:
+    """GET an ENTSOG endpoint and return its rows.
+
+    ENTSOG wraps rows under a key named after the endpoint (e.g.
+    "operationaldata"). If the response isn't shaped like that, raise with
+    the status and a snippet of the body so the problem is visible.
+    """
+    resp = requests.get(ENTSOG_URL + endpoint, params=params, timeout=120)
+    try:
+        payload = resp.json()
+    except ValueError:
+        payload = None
+    if resp.status_code != 200 or not isinstance(payload, dict) or endpoint.lower() not in payload:
+        raise RuntimeError(
+            f"Unexpected ENTSOG response from /{endpoint}: HTTP {resp.status_code}, "
+            f"keys={list(payload) if isinstance(payload, dict) else None}, body={resp.text[:500]!r}"
+        )
+    return payload[endpoint.lower()]
+
+
+def get_lng_terminal_points() -> pd.DataFrame:
+    """EU LNG terminal entry points into the transmission grid, per ENTSOG.
+
+    ENTSOG has no working EU-level LNG aggregate (its aggregatedData endpoint
+    returns "No result found"), so the EU figure is built by summing every
+    point where an LNG terminal feeds a transmission operator. Terminals that
+    feed two grids (e.g. Dunkerque into France and Belgium) appear once per grid.
+
+    Returns:
+        DataFrame with columns: terminal, country, operator_key, point_key.
+    """
+    rows = pd.DataFrame(_entsog_get("interconnections", {"limit": -1}))
+    lng = rows[(rows["fromInfrastructureTypeLabel"] == "LNG Terminals")
+               & (rows["toDirectionKey"] == "entry")]
+    lng = lng[~lng["toCountryKey"].isin(LNG_EXCLUDED_COUNTRIES)
+              & ~lng["toPointKey"].str.startswith(LNG_EXCLUDED_POINT_PREFIXES)]
+    points = lng[["pointLabel", "toCountryKey", "toOperatorKey", "toPointKey"]].drop_duplicates(
+        ["toOperatorKey", "toPointKey"]
+    )
+    points.columns = ["terminal", "country", "operator_key", "point_key"]
+    return points.reset_index(drop=True)
+
+
+def get_lng_sendout(days_back: int = 180) -> pd.DataFrame:
+    """Daily EU LNG send-out (regasified gas entering the grid) from ENTSOG.
+
+    Sums the "Physical Flow" indicator across all EU LNG terminal entry points.
+    ENTSOG reports kWh/d; values are converted to GWh/d. The most recent gas
+    days are dropped until at least 90% of terminals have reported, so late
+    reporting doesn't show up as a fake drop in send-out.
+
+    Args:
+        days_back: Number of calendar days of history to request.
+
+    Returns:
+        DataFrame with columns: date, lng_sendout_gwh (GWh/d), terminals_reporting.
+        df.attrs["terminals"] lists the terminals included.
+    """
+    points = get_lng_terminal_points()
+    point_directions = ",".join(
+        f"{op.lower()}{pt.lower()}entry" for op, pt in zip(points["operator_key"], points["point_key"])
+    )
+    end = date.today()
+    start = end - timedelta(days=days_back)
+
+    flows = pd.DataFrame(_entsog_get("operationaldata", {
+        "pointDirection": point_directions,
+        "indicator": "Physical Flow",
+        "periodType": "day",
+        "from": start.isoformat(),
+        "to": end.isoformat(),
+        "limit": -1,
+    }))
+    if flows.empty:
+        raise RuntimeError(
+            f"ENTSOG returned no LNG physical-flow rows for {start} to {end} "
+            f"across {len(points)} terminal entry points"
+        )
+    units = set(flows["unit"].dropna())
+    if units != {"kWh/d"}:
+        raise RuntimeError(f"Expected ENTSOG flows in kWh/d, got units {sorted(units)}")
+
+    # Gas days start at 05:00/06:00 local time; the calendar date of the start is the gas day
+    flows["date"] = pd.to_datetime(flows["periodFrom"].str[:10])
+    flows["value"] = pd.to_numeric(flows["value"], errors="coerce")
+    reported = flows.dropna(subset=["value"])
+    daily = reported.groupby("date").agg(
+        lng_sendout_gwh=("value", lambda v: v.sum() / 1e6),
+        terminals_reporting=("pointKey", "nunique"),
+    ).reset_index()
+
+    # Trim trailing days where reporting is still incomplete
+    full = daily["terminals_reporting"].max()
+    complete = daily["terminals_reporting"] >= LNG_MIN_REPORTING_SHARE * full
+    last_complete = daily.loc[complete, "date"].max()
+    daily = daily[daily["date"] <= last_complete].reset_index(drop=True)
+
+    # Name terminals from the point list (ENTSOG point labels change over time)
+    reporting_keys = set(zip(reported["operatorKey"], reported["pointKey"]))
+    included = points[[k in reporting_keys for k in zip(points["operator_key"], points["point_key"])]]
+    daily.attrs["terminals"] = sorted(included["terminal"].str.strip().unique())
+    _print_coverage("ENTSOG EU LNG send-out", daily["date"])
+    return daily
 
 
 def _fetch_feed(source: str, url: str, gas_only: bool) -> list[dict]:

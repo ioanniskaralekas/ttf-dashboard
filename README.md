@@ -9,6 +9,7 @@ futures prices with EU-aggregate storage levels.
 |---|---|---|---|
 | TTF front-month futures | Yahoo Finance (`TTF=F`) via `yfinance` | settlement price (EUR/MWh), volume | Oct 2017 onward |
 | EU gas storage | [GIE AGSI+](https://agsi.gie.eu/) API | % full, gas in storage (TWh) | Jan 2011 onward |
+| EU LNG send-out | [ENTSOG Transparency Platform](https://transparency.entsog.eu/) API | physical flow at LNG terminal entry points (kWh/d → GWh/d) | 3 years (app) |
 | Headlines | Public RSS feeds via `feedparser` | title, link, date, source | last few days |
 
 The pipeline pulls the full available history from both sources (AGSI+ pages
@@ -47,8 +48,11 @@ streamlit run app.py
   with the min–max band and average of the five calendar years before it,
   plus today's gap to the average
 
-Content is organised into **Overview**, **Price & Volatility**, **Storage**
-and **News** tabs. News shows the latest gas-market headlines (title, source,
+Content is organised into **Overview**, **Price & Volatility**, **Storage**,
+**Flows** and **News** tabs. Flows shows EU LNG send-out: ENTSOG has no
+working EU-level LNG aggregate, so it sums the daily physical flow at every
+EU LNG terminal entry point (30 terminals, UK excluded, Spain's virtual tank
+point excluded to avoid double counting). News shows the latest gas-market headlines (title, source,
 link and time only) from public RSS feeds (Reuters via Google News, Natural
 Gas Intelligence, LNG Prime, OilPrice.com, Rigzone), cached for 30 minutes.
 Mixed oil/gas feeds are filtered to gas headlines, and a feed that is down
